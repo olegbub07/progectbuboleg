@@ -1,17 +1,19 @@
 """
 Модуль для работы с хранилищем заметок.
 
-Отвечает за сохранение, чтение, удаление и поиск заметок в JSON-файле.
+Отвечает за сохранение, чтение, удаление и поиск заметок в JSON-файле и базе данных PostgreSQL.
 """
 
 import json
 import os
+import psycopg2
 from datetime import datetime, date, timedelta
 from typing import List
 from .models import Note
+from .database import Database
 
 class NoteStorage:
-    """Класс для работы с файлом заметок в формате JSON.
+    """Класс для работы с файлом заметок в формате JSON и базой данных PostgreSQL.
     
     Attributes:
         filename (str): Имя файла для хранения заметок.
@@ -24,6 +26,7 @@ class NoteStorage:
             filename (str, optional): Имя файла для хранения. По умолчанию "notes.json".
         """
         self.filename = filename
+        self.db = Database()
         self._ensure_storage_file()
     
     def _ensure_storage_file(self):
@@ -67,11 +70,32 @@ class NoteStorage:
         Returns:
             List[Note]: Список объектов заметок.
         """
-        notes_data = self._read_notes()
-        return [Note.from_dict(note_data) for note_data in notes_data]
+        # Получаем заметки из базы данных
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                "SELECT id, title, content, created_at FROM notes ORDER BY created_at DESC"
+            )
+            rows = cursor.fetchall()
+            
+            notes = []
+            for row in rows:
+                note = Note.from_db_row(row)
+                notes.append(note)
+            
+            return notes
+        except Exception as e:
+            print(f"Ошибка при получении заметок из БД: {e}")
+            # Если ошибка с БД, возвращаем заметки из JSON файла
+            notes_data = self._read_notes()
+            return [Note.from_dict(note_data) for note_data in notes_data]
+        finally:
+            cursor.close()
     
     def save_note(self, note: Note) -> Note:
-        """Сохраняет заметку в файл.
+        """Сохраняет заметку в файл и базу данных.
         
         Если у заметки нет ID, ей присваивается новый уникальный ID
         и она добавляется в хранилище.
@@ -85,6 +109,34 @@ class NoteStorage:
         Raises:
             IOError: Если произошла ошибка записи в файл.
         """
+        # Сохраняем в базу данных
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            if note.id is None:
+                # Вставка новой заметки
+                cursor.execute(
+                    "INSERT INTO notes (title, content, created_at) VALUES (%s, %s, %s) RETURNING id",
+                    (note.title, note.content, note.created_at)
+                )
+                note.id = cursor.fetchone()[0]
+            else:
+                # Обновление существующей заметки
+                cursor.execute(
+                    "UPDATE notes SET title = %s, content = %s WHERE id = %s",
+                    (note.title, note.content, note.id)
+                )
+            
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            print(f"Ошибка при сохранении заметки в БД: {e}")
+        
+        finally:
+            cursor.close()
+        
+        # Также сохраняем в JSON файл для обратной совместимости
         notes_data = self._read_notes()
         
         if note.id is None:
@@ -93,6 +145,14 @@ class NoteStorage:
             else:
                 note.id = 1
             notes_data.append(note.to_dict())
+        else:
+            # Обновляем существующую заметку в JSON
+            for i, note_data in enumerate(notes_data):
+                if note_data['id'] == note.id:
+                    notes_data[i] = note.to_dict()
+                    break
+            else:
+                notes_data.append(note.to_dict())
         
         self._write_notes(notes_data)
         return note
@@ -106,15 +166,32 @@ class NoteStorage:
         Returns:
             bool: True если удаление успешно, False если заметка не найдена.
         """
+        # Удаляем из базы данных
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
+        
+        db_deleted = False
+        try:
+            cursor.execute("DELETE FROM notes WHERE id = %s", (note_id,))
+            conn.commit()
+            db_deleted = cursor.rowcount > 0
+        except Exception as e:
+            conn.rollback()
+            print(f"Ошибка при удалении заметки из БД: {e}")
+        finally:
+            cursor.close()
+        
+        # Удаляем из JSON файла
         notes_data = self._read_notes()
         initial_length = len(notes_data)
         
         notes_data = [note for note in notes_data if note['id'] != note_id]
         
-        if len(notes_data) < initial_length:
+        json_deleted = len(notes_data) < initial_length
+        if json_deleted:
             self._write_notes(notes_data)
-            return True
-        return False
+        
+        return db_deleted or json_deleted
     
     def search_notes(self, query: str) -> List[Note]:
         """Ищет заметки по тексту в заголовке или содержании.
@@ -125,13 +202,35 @@ class NoteStorage:
         Returns:
             List[Note]: Список найденных заметок.
         """
-        notes = self.get_all_notes()
-        query = query.lower()
+        # Ищем в базе данных
+        conn = self.db.get_connection()
+        cursor = conn.cursor()
         
-        return [
-            note for note in notes 
-            if query in note.title.lower() or query in note.content.lower()
-        ]
+        try:
+            cursor.execute(
+                "SELECT id, title, content, created_at FROM notes WHERE title ILIKE %s OR content ILIKE %s ORDER BY created_at DESC",
+                (f'%{query}%', f'%{query}%')
+            )
+            rows = cursor.fetchall()
+            
+            notes = []
+            for row in rows:
+                note = Note.from_db_row(row)
+                notes.append(note)
+            
+            return notes
+        except Exception as e:
+            print(f"Ошибка при поиске заметок в БД: {e}")
+            # Если ошибка с БД, ищем в JSON файле
+            notes = self.get_all_notes()
+            query = query.lower()
+            
+            return [
+                note for note in notes 
+                if query in note.title.lower() or query in note.content.lower()
+            ]
+        finally:
+            cursor.close()
     
     def filter_notes_by_date(self, notes: List[Note], date_filter: str) -> List[Note]:
         """Фильтрует заметки по дате создания.

@@ -57,3 +57,22 @@ class Note:
         note.id = data['id']
         note.created_at = data['created_at']
         return note
+    
+    @classmethod
+    def from_db_row(cls, row):
+        """Создает объект заметки из строки базы данных.
+        
+        Args:
+            row: Кортеж с данными из БД (id, title, content, created_at)
+            
+        Returns:
+            Note: Объект заметки.
+        """
+        note = cls(row[1], row[2])
+        note.id = row[0]
+        # Обрабатываем как datetime объект, так и строку
+        if hasattr(row[3], 'isoformat'):
+            note.created_at = row[3].isoformat()
+        else:
+            note.created_at = row[3]
+        return note
