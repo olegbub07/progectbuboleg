@@ -15,8 +15,8 @@ project_dir = os.path.dirname(docs_dir)                        # project folder
 sys.path.insert(0, project_dir)
 
 project = 'Менеджер Заметок'
-copyright = '2025, Дмитрий Лютиков ВКБ-33'
-author = 'Дмитрий Лютиков ВКБ-33'
+copyright = '2025, Бубнов Олег ВКБ31'
+author = 'Бубнов Олег ВКБ31'
 release = '1.0'
 
 # -- General configuration ---------------------------------------------------
